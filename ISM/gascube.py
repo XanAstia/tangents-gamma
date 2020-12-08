@@ -1,14 +1,14 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import time
+import gzip
 from astropy.io import fits
 from epsDetectS import epsDetect
-from iminuit import Minuit
-from mPSV import multiPSV_chi2  # my version
 from matplotlib.colors import LogNorm
 from mpl_toolkits.axes_grid1 import AxesGrid
 from pseudoVoigt import pseudoVoigt  # Quentin's version
-from reid14_cordes02 import lbd2vlsr
+from reid19_rotation import rotcurve, R0, V0
+from MW_utils import lbd2vlsr
 from scipy.io import loadmat
 import pdb
 
@@ -61,17 +61,24 @@ class gascube:
                 'CTYPE' + str(i + 1)) == 'VELO-LSRK' or self.header.get(
                 'CTYPE' + str(i + 1)) == 'VEL' or self.header.get(
                 'CTYPE' + str(i + 1)) == 'VRAD'):
+                # initialise velocity unit
+                self.vscale = 1.
                 self.atlas['velocity'] = i + 1
                 self.refpix['velocity'] = self.header.get(
                     'CRPIX' + str(i + 1)) - 1
                 self.refval['velocity'] = self.header.get('CRVAL' + str(i + 1))
                 self.delta['velocity'] = self.header.get('CDELT' + str(i + 1))
                 self.naxis['velocity'] = self.header.get('NAXIS' + str(i + 1))
-                # store velocity unit
-                self.vscale = 1.
+                # check if velocity unit is stored in comment
+                if 'M/S' in self.header.comments['CDELT' + str(i + 1)]:
+                    self.vscale = 1.e3
+                if 'KM/S' in self.header.comments['CDELT' + str(i + 1)]:
+                    self.vscale = 1.
+                # check if velocity unit is defined by dedicated key
+                # key takes precedence over comment
                 try:
                     u = self.header.get('CUNIT' + str(i + 1))
-                    if u == 'M/S' or u == 'm/s':
+                    if u == 'M/S' or u == 'm/s' or u == 'm s-1':
                         self.vscale = 1.e3
                     else:
                         pass
@@ -188,9 +195,9 @@ class gascube:
 
         N = np.shape(idx)[1]
         for s in range(N):
-            lon = self.pix2coord(idx[self.atlas['longitude'] - 1][s],'longitude')
-            lat = self.pix2coord(idx[self.atlas['latitude'] - 1][s], 'latitude')
-            vel = self.pix2coord(idx[self.atlas['velocity'] - 1][s], 'velocity')/self.vscale
+            lon = self.pix2coord(idx[3- self.atlas['longitude']][s],'longitude')
+            lat = self.pix2coord(idx[3 - self.atlas['latitude']][s], 'latitude')
+            vel = self.pix2coord(idx[3 - self.atlas['velocity']][s], 'velocity')/self.vscale
             f.write('{},{},{}\n'.format(lon,lat,vel))
 
         f.close()
@@ -227,54 +234,9 @@ class gascube:
 
         return vel, self.fitres['vfit'][il, ib, :], PV, Tfit, aic
 
-    # def mPSV_profile_fit(self, vv, tb, lis=1, lng=2, thresh=3., sig=2.5, print_level=1):
-    #
-    #     # line detection
-    #     ilin, eps = epsDetect(tb, lis=lis, lng=lng, sig=sig)
-    #     ilin = np.array(ilin).astype('int')
-    #     eps = np.array(eps)
-    #     ilin = ilin[eps > thresh]
-    #     eps = eps[eps > thresh]
-    #     vlin = vv[ilin]
-    #
-    #     # fit, define chi square
-    #     chi2 = multiPSV_chi2(vv, tb)
-    #     # define params tuple, initial values, limits, etc
-    #     ptup = ()
-    #     kwdarg = {}
-    #     for n in range(len(eps)):
-    #         ptup = ptup + ('A_' + str(n),)
-    #         kwdarg['A_' + str(n)] = eps[n]
-    #         kwdarg['error_A_' + str(n)] = 10
-    #         kwdarg['limit_A_' + str(n)] = (0., 1.e8)
-    #         ptup = ptup + ('x0_' + str(n),)
-    #         kwdarg['x0_' + str(n)] = vlin[n]
-    #         kwdarg['error_x0_' + str(n)] = 0.5
-    #         kwdarg['limit_x0_' + str(n)] = (vlin[n] - 5., vlin[n] + 5.)
-    #         ptup = ptup + ('gammaG_' + str(n),)
-    #         kwdarg['gammaG_' + str(n)] = 5.
-    #         kwdarg['error_gammaG_' + str(n)] = 2.
-    #         kwdarg['limit_gammaG_' + str(n)] = (0.01, 1.e2)
-    #         ptup = ptup + ('gammaL_' + str(n),)
-    #         kwdarg['gammaL_' + str(n)] = 5.
-    #         kwdarg['error_gammaL_' + str(n)] = 2.
-    #         kwdarg['limit_gammaL_' + str(n)] = (0.01, 1.e2)
-    #         # create minuit object, minimize, return results
-    #     m = Minuit(chi2, forced_parameters=ptup, errordef=1, print_level=print_level, **kwdarg)
-    #     fitres = m.migrad()[0]
-    #     model = chi2.multiPSV(*m.args)
-    #     v_lines = []
-    #     ind_lines = []
-    #     for n in range(len(eps)):
-    #         v_lines.append(m.args[4 * n + 1])
-    #         ind_lines.append(chi2.PSV(*m.args[4 * n:4 * (n + 1)]))
-    #
-    #     del m  # try to save memory
-    #
-    #     return fitres, model, ind_lines, v_lines
-    #
-    def line(self, l, b, vmin, vmax, vcuts=False, dcuts=False, plotFit=False, lineDtc=False,
-             lng=2, lis=1, sig=2.5, thresh=3., fitLine=False):
+
+    def line(self, l, b, vmin, vmax, vcuts=False, dcuts=False, cutfile = False,
+             plotFit=False, lineDtc=False, lng=2, lis=1, sig=2.5, thresh=3., fitLine=False):
 
         vel, Tb = self.getLineData(l, b, vmin, vmax)
 
@@ -291,12 +253,21 @@ class gascube:
                 vmax = eval(vrange[1])
                 plt.axvline(vmin, color='k')
                 plt.axvline(vmax, color='k')
-
-        if dcuts:
+        elif dcuts:
             for bound in dcuts:
                 lon = l
                 lat = b
-                vlsr = lbd2vlsr(lon, lat, bound)
+                vlsr = lbd2vlsr(lon, lat, bound,R0,V0,rotcurve)
+                plt.axvline(vlsr, color='k')
+        elif cutfile:
+            cuts = np.load(cutfile)
+            for cut in cuts:
+                # make sure x-values are sorted
+                idx = np.argsort(cut[0])
+                cut[1] = cut[1][idx]
+                cut[0] = cut[0][idx]
+                # plot at line position
+                vlsr = np.interp(l, cut[0], cut[1],R0,V0,rotcurve)
                 plt.axvline(vlsr, color='k')
 
         if plotFit:
@@ -387,7 +358,7 @@ class gascube:
         hdu.header.add_history('map generated by {}, {}'.format(name, email))
         hdu.header.add_history('on ' + time.ctime() + ' ' + time.tzname[1])
 
-    def lbmaps(self, lmin, lmax, bmin, bmax, vmin, vmax, names, vcuts=False, dcuts=False,
+    def lbmaps(self, lmin, lmax, bmin, bmax, vmin, vmax, names, vcuts=False, dcuts=False, cutfile = False,
                outdir='./', name_tag='', saveMaps=False, display=True, authname='L. Tibaldo',
                authemail='luigi.tibaldo@irap.omp.eu', useFit=False, dev_thresh=0.3):
 
@@ -405,7 +376,7 @@ class gascube:
         bmin = np.maximum(bmin, bl)
         bmax = np.minimum(bmax, bu)
 
-        if vcuts == False and dcuts == False:
+        if vcuts == False and dcuts == False and cutfile == False:
             raise ValueError("Bounds for map generation not specified")
         else:
             lbins = int((lmax - lmin) / abs(self.delta['longitude'])) + 1
@@ -417,9 +388,17 @@ class gascube:
             F.subplots_adjust(left=0.08, right=0.95, top=0.95, bottom=0.08)
 
             if vcuts:
-                nn = len(vcuts) + 1
+                nn = len(vcuts)
             elif dcuts:
                 nn = len(dcuts) + 1
+            elif cutfile:
+                cuts = np.load(cutfile)
+                nn = len(cuts) + 1
+                # make sure x-values are sorted
+                for cut in cuts:
+                    idx = np.argsort(cut[0])
+                    cut[1] = cut[1][idx]
+                    cut[0] = cut[0][idx]
 
             ngrid = int(np.ceil(np.sqrt(nn)))
 
@@ -447,8 +426,16 @@ class gascube:
                     lat = self.pix2coord(bpix, 'latitude')
                     # if using distance cuts turn them in velocity
                     if dcuts:
-                        vlsr = lbd2vlsr(lon, lat, np.array(dcuts))
+                        vlsr = lbd2vlsr(lon, lat, np.array(dcuts),R0,V0,rotcurve)
                         vlsr = np.append(vmin, vlsr)
+                        vlsr = np.append(vlsr, vmax)
+                    # if using a file build the velocity array for the l,b bin
+                    if cutfile:
+                        vlsr = np.array([])
+                        vlsr = np.append(vlsr,vmin)
+                        for cut in cuts:
+                            vval = np.interp(lon,cut[0],cut[1])
+                            vlsr = np.append(vlsr,vval)
                         vlsr = np.append(vlsr, vmax)
                     # retrieve data, and, in case fit
                     vel, Tb = self.getLineData(lon, lat, vmin, vmax)
@@ -476,7 +463,7 @@ class gascube:
                             vrange = vcuts[s]
                             vlow = eval(vrange[0])
                             vup = eval(vrange[1])
-                        elif dcuts:
+                        elif dcuts or cutfile:
                             vlow = vlsr[s]
                             vup = vlsr[s + 1]
                         if useFit and good_fit:
@@ -498,12 +485,13 @@ class gascube:
 
             # display and in case save maps
             if saveMaps:
-                histxt = ''
-                for s, line in enumerate(history):
-                    if not s == (len(history) - 1):
-                        histxt = histxt + line + '/'
-                    else:
-                        histxt = histxt + line
+                # history
+                # takes a while to write in fits, dump separately
+                histfile = gzip.open(outdir + 'lbmap_' + name_tag + 'history.txt.gz', 'wb')
+                for k, line in enumerate(history):
+                    if not k == (len(history) - 1):
+                        histfile.write((line + '\n').encode())
+                histfile.close()
 
             for s in range(nn):
                 im = grid[s].imshow(vmaps[s], extent=extent, interpolation='none',
@@ -535,11 +523,11 @@ class gascube:
                             self.commheader(maphdu, 'velocity cuts: ' + str(dcuts))
                         elif dcuts:
                             self.commheader(maphdu, 'heliocentric distance cuts: ' + str(dcuts))
+                        elif cutfile:
+                            self.commheader(maphdu, 'velocity cuts from file: ' + str(cutfile))
                         if useFit:
                             self.commheader(maphdu, 'correction based on line profile fitting')
                         self.commheader(maphdu, 'Map: n. {}, {}'.format(s, names[s]))
-                        # history
-                        maphdu.header["RECORD"] = histxt
                         self.history(maphdu, authname, authemail)
                         maphdu.writeto(outdir + 'lbmap_' + name_tag + names[s] + '.fits')
                     except:
@@ -555,133 +543,6 @@ class gascube:
             else:
                 pass
 
-    # def lbmaps_fit(self, lmin, lmax, bmin, bmax, vmin, vmax, names, vcuts=False, dcuts=False,
-    #                outdir='./', saveMaps=False, lng=2, lis=1, sig=2.5, thresh=3,
-    #                authname='L. Tibaldo',
-    #                authemail='luigi.tibaldo@irap.omp.eu'):
-    #
-    #     if vcuts == False and dcuts == False:
-    #         raise ValueError("Bounds for map generation not specified")
-    #     else:
-    #         lbins = int((lmax - lmin) / abs(self.delta['longitude'])) + 1
-    #         bbins = int((bmax - bmin) / abs(self.delta['latitude'])) + 1
-    #         ldir = self.delta['longitude'] / abs(self.delta['longitude'])
-    #         bdir = self.delta['latitude'] / abs(self.delta['latitude'])
-    #
-    #         if vcuts:
-    #             nn = len(vcuts) + 1
-    #         elif dcuts:
-    #             nn = len(dcuts) + 1
-    #
-    #         vmaps = np.zeros([nn, bbins, lbins])
-    #
-    #         history = []
-    #         for ll in range(lbins):
-    #             print(ll, 'of', (lbins - 1))
-    #             for bb in range(bbins):
-    #                 ##### Basic quantities
-    #                 lpix = self.coord2pix(lmax, 'longitude') - ll * ldir
-    #                 bpix = self.coord2pix(bmin, 'latitude') + bb * bdir
-    #                 lon = self.pix2coord(lpix, 'longitude')
-    #                 lat = self.pix2coord(bpix, 'latitude')
-    #                 vel, Tb = self.getLineData(lon, lat, vmin, vmax)
-    #                 ##### Fitting
-    #                 fit_success = True
-    #                 if np.any(Tb <= -3) or len(Tb[Tb < -0.3]) > 30:
-    #                     history.append('lon {} lat {} FAILED: invalid values'.format(lon, lat))
-    #                     fit_success = False
-    #                 else:
-    #                     fitres, model, ind_lines, vlin = self.mPSV_profile_fit(vel, Tb,
-    #                                                                            lis=lis,
-    #                                                                            lng=lng,
-    #                                                                            thresh=thresh,
-    #                                                                            sig=sig,
-    #                                                                            print_level=0)
-    #                     dev = np.sum(np.abs(Tb - model)) / np.sum(Tb)
-    #                     if (fitres['is_valid'] == True or \
-    #                         (fitres['has_covariance'] == True and fitres[
-    #                             'has_valid_parameters'] == True and \
-    #                          (fitres['has_reached_call_limit'] == False or
-    #                           fitres['is_above_max_edm'] == False)) \
-    #                             ) \
-    #                             and dev < 1.:
-    #                         msg = 'lon {} lat {} integrated fractional model deviation {}'.format(
-    #                             lon, lat, dev)
-    #                         history.append(msg)
-    #                     else:
-    #                         msg = 'lon {} lat {} FAILED: fit output {}, data-model deviation {}'.format(
-    #                             lon, lat, fitres, dev)
-    #                         history.append(msg)
-    #                         fit_success = False
-    #                     ##### Fitting
-    #                     for s in range(nn):
-    #                         # calculate v boundaries
-    #                         if vcuts:
-    #                             vrange = vcuts[s]
-    #                             vlow = eval(vrange[0])
-    #                             vup = eval(vrange[1])
-    #                         elif dcuts:
-    #                             vlsr = lbd2vlsr(lon, lat, np.array(dcuts))
-    #                             vlsr = np.append(vmin, vlsr)
-    #                             vlsr = np.append(vlsr, vmax)
-    #                             vlow = vlsr[s]
-    #                             vup = vlsr[s + 1]
-    #                         # calculate column densities
-    #                         if fit_success:
-    #                             # add integral of lines belonging to region
-    #                             for ii, ivlin in enumerate(vlin):
-    #                                 if (ivlin >= vlow) and (ivlin < vup):
-    #                                     vmaps[s, bb, ll] += self.column(vel, ind_lines[ii])
-    #                             # add data/model difference
-    #                             vv = vel[(vel >= vlow) & (vel < vup)]
-    #                             tt = Tb[(vel >= vlow) & (vel < vup)]
-    #                             mm = model[(vel >= vlow) & (vel < vup)]
-    #                             vmaps[s, bb, ll] += self.column(vv, tt) - self.column(vv, mm)
-    #                         else:
-    #                             # just use integral
-    #                             vv = vel[(vel >= vlow) & (vel < vup)]
-    #                             tt = Tb[(vel >= vlow) & (vel < vup)]
-    #                             vmaps[s, bb, ll] += self.column(vv, tt)
-    #
-    #         if saveMaps:
-    #
-    #             histxt = ''
-    #             for s, line in enumerate(history):
-    #                 if not s == (len(history) - 1):
-    #                     histxt = histxt + line + '/'
-    #                 else:
-    #                     histxt = histxt + line
-    #
-    #             for s in range(nn):
-    #                 maphdu = fits.PrimaryHDU(vmaps[s])
-    #                 lmax_out = self.pix2coord(self.coord2pix(lmax, 'longitude'), 'longitude')
-    #                 bmin_out = self.pix2coord(self.coord2pix(bmin, 'latitude'), 'latitude')
-    #                 bunit = {}
-    #                 if self.int2col == 1:
-    #                     bunit['unit'] = 'K km s-1'
-    #                     bunit['quantity'] = 'v-integrated Tb'
-    #                 else:
-    #                     bunit['unit'] = 'cm-2'
-    #                     bunit['quantity'] = 'N(H)'
-    #                 self.mapheader(maphdu, lmax_out, bmin_out, bunit)
-    #                 # comments
-    #                 if self.int2col != 1.:
-    #                     msg = 'Integral to column: {} cm-2 (K km s-1)-1'.format(self.int2col)
-    #                     self.commheader(maphdu, msg)
-    #                 if self.Ts != -10:
-    #                     self.commheader(maphdu, 'Spin temperature: {} K'.format(self.Ts))
-    #                 if vcuts:
-    #                     self.commheader(maphdu, 'velocity cuts: ' + str(dcuts))
-    #                 elif dcuts:
-    #                     self.commheader(maphdu, 'heliocentric distance cuts: ' + str(dcuts))
-    #                 self.commheader(maphdu, 'Map: n. {}, {}'.format(s, names[s]))
-    #                 maphdu.header["RECORD"] = histxt
-    #                 # history
-    #                 self.history(maphdu, authname, authemail)
-    #                 maphdu.writeto(outdir + 'lbmap_fit_' + names[s] + '.fits')
-    #
-    #         else:
-    #             pass
 
     def vdiagram(self, lmin, lmax, bmin, bmax, vmin, vmax, integrate='latitude'):
 
@@ -692,8 +553,9 @@ class gascube:
         jmax = self.coord2pix(bmax, 'latitude')
         kmin = self.coord2pix(vmin * self.vscale, 'velocity')
         kmax = self.coord2pix(vmax * self.vscale, 'velocity')
-        # establish sense of increasing longitude
+        # establish sense of increasing longitude and velocity
         ldir = self.delta['longitude'] / abs(self.delta['longitude'])
+        vdir = self.delta['velocity'] / abs(self.delta['velocity'])
 
         # set boundaries according to axes order and orientation
         pixmin = [0, 0, 0]
@@ -706,15 +568,28 @@ class gascube:
             pixmax[self.atlas['longitude'] - 1] = imin
         pixmin[self.atlas['latitude'] - 1] = jmin
         pixmax[self.atlas['latitude'] - 1] = jmax
-        pixmin[self.atlas['velocity'] - 1] = kmin
-        pixmax[self.atlas['velocity'] - 1] = kmax
+        if vdir > 0:
+            pixmin[self.atlas['velocity'] - 1] = kmin
+            pixmax[self.atlas['velocity'] - 1] = kmax
+        else:
+            pixmin[self.atlas['velocity'] - 1] = kmax
+            pixmax[self.atlas['velocity'] - 1] = kmin
         im = self.data[pixmin[2]:pixmax[2], pixmin[1]:pixmax[1], pixmin[0]:pixmax[0]]
 
         # if we integrate over latitude make sure longitude increases right to left
         if integrate == 'latitude' and ldir > 0:
             im = np.flip(im, axis=(3 - self.atlas['longitude']))
+        if vdir < 0:
+            im = np.flip(im, axis=(3 - self.atlas['velocity']))
+        # always make sure velocity increases bottom to top
         # integrate over appropriate axis
         im = np.sum(im, axis=(3 - self.atlas[integrate]))
+
+        # multiply by Delta to obtain K deg
+        if integrate == 'latitude':
+            im *= np.abs(self.delta['latitude'])
+        elif integrate == 'longitude':
+            im *= np.abs(self.delta['longitude'])
 
         # create the figure
         ax = plt.subplot(111)
@@ -727,7 +602,7 @@ class gascube:
             extent = (lmax, lmin, vmin, vmax)
             ax.set_xlabel('$l$ (deg)')
             ax.set_ylabel('V (km s$^{-1}$)')
-        if integrate == 'longitude':
+        elif integrate == 'longitude':
             if self.atlas['velocity'] > self.atlas['latitude']:
                 im = im.transpose()
             extent = (vmin, vmax, bmin, bmax)
@@ -736,7 +611,7 @@ class gascube:
 
         # display the map
         plt.imshow(im, interpolation='none', origin='lower', extent=extent, aspect='auto',
-                   norm=LogNorm(), cmap='jet')
+                   norm=LogNorm(vmin=2*np.abs(self.delta['latitude'])), cmap='jet')
         cbar = plt.colorbar(label="K deg")
 
         plt.show()
@@ -779,6 +654,7 @@ class gascube:
             im = np.zeros([bbins, vbins])
 
         for ll in range(lbins):
+            print(ll,'of',lbins)
             for bb in range(bbins):
                 lpix = self.coord2pix(lmax, 'longitude') - ll * ldir
                 bpix = self.coord2pix(bmin, 'latitude') + bb * bdir
@@ -789,7 +665,9 @@ class gascube:
                     vpix = self.coord2pix(self.vscale * vmin, 'velocity') + vv * vdir
                     vel = self.pix2coord(vpix, 'velocity')/self.vscale
                     for klin, vlin in enumerate(vfit):
-                        if np.abs(vlin - vel) <= np.abs(self.delta['velocity']/self.vscale) / 2:
+                        # check if line velocity falls within bin and that there is valid a fitted profile
+                        if np.abs(vlin - vel) <= np.abs(self.delta['velocity']/self.vscale) / 2 and \
+                                klin < len(PV[0,:]):
                             if integrate == 'latitude':
                                 im[vv,ll] += self.column(velf, PV[:, klin])
                             elif integrate == 'longitude':
@@ -797,6 +675,7 @@ class gascube:
                         else:
                             pass
 
+        print('done')
 
         # create the figure
         ax = plt.subplot(111)
@@ -817,6 +696,6 @@ class gascube:
                    origin='lower', extent=extent, aspect='auto',
                    norm=LogNorm(vmin=1),
                    cmap='jet')
-        cbar = plt.colorbar(label="N(H) (cm-2)")
+        cbar = plt.colorbar(label="N(H) 10^20 cm^-2")
 
         plt.show()
